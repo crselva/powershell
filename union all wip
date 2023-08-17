@@ -1,0 +1,185 @@
+
+Add-Type -AssemblyName System.Windows.Forms
+
+# Function to display a dialog box with an Input box for user to specify number of files to be processed
+function getNoOfFiles
+{
+    ## https://stackoverflow.com/questions/30534273/simple-inputbox-function#:~:text=The%20simplest%20way%20to%20get,Host%20cmdlet%20and%20%2DAsSecureString%20parameter.&text=Then%20you%20can%20call%20the,User%20cancelled%20the%20form!%22%20%7D
+    [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.VisualBasic')
+    $noOfFiles = [Microsoft.VisualBasic.Interaction]::InputBox("How many tiles would you like to process", "Input files count")
+    return $noOfFiles
+}
+
+# function to open the file selection window
+function getFileDetails($filecount,$filePath)
+{
+    $filesHere = @()
+
+    for ($i = 0; $i -lt $filecount; $i++)
+    { 
+        ## https://4sysops.com/archives/how-to-create-an-open-file-folder-dialog-box-with-powershell/
+        Add-Type -AssemblyName System.Windows.Forms
+        $FileBrowser = New-Object System.Windows.Forms.OpenFileDialog -Property @{ 
+            InitialDirectory = ($filePath) 
+            Filter = 'CSV (*.csv)|*.csv|PSV (*.psv)|*.psv'
+        }
+        $null = $FileBrowser.ShowDialog()
+        
+        $thisFile = New-Object -TypeName PSObject
+        $thisFile | Add-Member -MemberType NoteProperty -Name 'FileName' -Value $FileBrowser.SafeFileName
+        $thisFile | Add-Member -MemberType NoteProperty -Name 'FilePath' -Value $FileBrowser.FileName
+        $filesHere += $thisFile
+        Clear-Variable -Name thisFile
+    }
+
+    return $filesHere
+}
+
+## https://www.tutorialspoint.com/how-to-get-the-path-of-the-currently-executing-script-in-powershell
+$scriptPath = $MyInvocation.MyCommand.Path
+$scriptPath = $scriptPath.Substring(0,($scriptPath.LastIndexOf('\'))+1)
+
+## https://ss64.com/ps/messagebox.html
+Add-Type -AssemblyName PresentationCore,PresentationFramework
+
+$answer = [System.Windows.MessageBox]::Show("Are the Input files available in the same path as the script","Input file location",4,32)
+
+if ($answer -eq 6)
+{
+    Write-Host "YES was clicked"
+
+    $noOfInpFiles = getNoOfFiles
+
+    $inputFileDetails = getFileDetails -filecount $noOfInpFiles -filePath $scriptPath
+}
+elseif ($answer -eq 7)
+{
+    Write-Host "NO was clicked"
+
+    $noOfInpFiles = getNoOfFiles
+
+    $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+
+    $inputFileDetails = getFileDetails -filecount $noOfInpFiles -filePath $desktopPath
+}
+
+$inputFileDetails | Format-Table
+
+$headerDetailsTable = @()
+
+# Create an empty custom object
+$headerDetailsRow = New-Object -TypeName PSObject
+
+$headerDetailsRow| Add-Member -MemberType NoteProperty -Name "commonHeaders" -Value $null
+
+for ($j = 0; $j -lt $inputFileDetails.length; $j++)
+{
+    ## https://stackoverflow.com/questions/13015303/dynamically-create-variables-in-powershell
+    New-Variable -Name "file$j" -Value (Import-Csv -Path $inputFileDetails[$j].FilePath)
+
+    New-Variable -Name "headers$j" -Value @((Get-Variable -Name "file$j" -ValueOnly)[0].psobject.Properties | Select Name)
+
+    Set-Variable -Name "headers$j" -Value (Get-variable -Name "headers$j" -ValueOnly).Name
+
+    $allHeaders += (Get-Variable -Name "headers$j" -ValueOnly)
+
+    # Add properties to the custom object without values
+    $headerDetailsRow| Add-Member -MemberType NoteProperty -Name $inputFileDetails[$j].FileName -Value $null
+}
+
+$headerDetailsTable += $headerDetailsRow
+
+$headerDetailsTable | Format-Table
+
+# find the common headers between files
+$commonHeaders = ($allHeaders | Group-Object | Select-Object Name, Count) | Where-Object { $_.Count -eq $inputFileDetails.length }
+
+# logic to remove common headers from the file headers and get the max count of headers in file
+foreach ($header in $commonHeaders)
+ {
+    $maxHeaderCount = 0
+
+    for ($k = 0; $k -lt $inputFileDetails.Length; $k++)
+    { 
+       # fetch the list of headers for the file, add to  temp variable
+       $headersHere = Get-variable -Name "headers$k" -ValueOnly
+
+       # create a temp header list
+       $updatedHeaders = @()
+
+       foreach ($fileHeader in $headersHere)
+       {  
+            # if the header from files donot match the common header, add it to a temp list
+            if ($fileHeader -ne $header.Name) { $updatedHeaders += $fileHeader }
+       }
+       # update the actual header list with the temp list created (without common headers)
+       Set-variable -Name "headers$k" -Value $updatedHeaders
+
+       if( (Get-variable -Name "headers$k" -ValueOnly).length -gt $maxHeaderCount){ $maxHeaderCount = (Get-variable -Name "headers$k" -ValueOnly).length }
+    }
+ }
+
+ for ($l = 0; $l -lt $maxHeaderCount; $l++){
+
+    # Create an empty custom object
+    $headerDetailsRow = New-Object -TypeName PSObject
+
+    if( $commonHeaders.length -gt $l){ $headerDetailsRow | Add-Member -MemberType NoteProperty -Name "commonHeaders" -Value $commonHeaders[$l].Name }
+ 
+    for ($m = 0; $m -lt $inputFileDetails.Length; $m++)
+    { 
+        if( (Get-variable -Name "headers$m" -ValueOnly).length -gt $l){
+            $headerDetailsRow | Add-Member -MemberType NoteProperty -Name $inputFileDetails[$m].FileName -Value ((Get-variable -Name "headers$m" -ValueOnly)[$l])
+        }
+    }
+
+    $headerDetailsTable += $headerDetailsRow
+ }
+
+ $headerDetailsTable | Select-Object -Skip 1
+
+ $headerDetailsPath = $scriptPath + "headerDetails.csv"
+
+ ($headerDetailsTable | Select-Object -Skip 1) | Export-Csv -Path $headerDetailsPath -NoTypeInformation
+
+ Invoke-Item -Path $headerDetailsPath
+
+ $answer2 = [System.Windows.MessageBox]::Show("Are the header details correct or updated","Header Details Confirmation",4,32)
+
+  
+if ($answer -eq 6)
+{
+    Write-Host "YES was clicked"
+
+    # import the updated/final details for processing
+    $processDetails = Import-Csv -Path $headerDetailsPath
+
+    # get the count of common headers
+    $commonHeadersCount = $processDetails.commonHeaders.IndexOf("")
+
+    # iterate through the commmon headers and get the unique values for them from the input files
+    for ($n = 0; $n -lt $commonHeadersCount; $n++)
+    {
+        $filterValues = @()
+
+        # iterate through the input files & get the values for the common header
+        for ($p = 0; $p -lt $inputFileDetails.Length; $p++)
+        { 
+            $param = $processDetails.commonHeaders[$n]
+            
+            $valHere = (Get-Variable -Name "file$p" -ValueOnly)
+            
+            $filtervalues += $valHere.$param
+            
+        }
+
+        # create a new variable and store the nique values betwen all files for commn headers
+        Read-Host "Press Enter"
+        New-Variable -Name "commonFilter$n" -value ($filterValues | Sort-Object -Unique)
+    }
+
+}
+elseif ($answer -eq 7)
+{
+    Write-Host "NO was clicked"
+}
